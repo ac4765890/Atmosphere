@@ -190,6 +190,15 @@ static inline bool vgicIsVirqPending(VirqState *state)
     return state->pendingLatch || (!vgicIsVirqEdgeTriggered(vgicGetVirqStateInterruptId(state)) && state->pending);
 }
 
+static inline bool vgicSetVirqPendingField(VirqState *state, bool val)
+{
+    if (!vgicIsVirqEdgeTriggered(vgicGetVirqStateInterruptId(state))) {
+        state->pending = val;
+    } else {
+        state->pendingLatch = val;
+    }
+}
+
 //////////////////////////////////////////////////
 
 static void vgicSetDistributorControlRegister(u32 value)
@@ -600,7 +609,7 @@ static void vgicCleanupPendingList(void)
             // we're notified when they become pending again.
 
             // Note: we can't touch PPIs for other cores... but each core will call this function anyway.
-            if (id >= 32) {
+            if (id >= 32 || node->coreId == currentCoreCtx->coreId) {
                 u8 mask = g_irqManager.gic.gicd->ispendr[id / 32] & BIT(id % 32);
                 if (mask == 0) {
                     g_irqManager.gic.gicd->icactiver[id / 32] = mask;
@@ -610,9 +619,43 @@ static void vgicCleanupPendingList(void)
         }
 
         if (!pending) {
+            vgicSetVirqPendingField(node, false);
             vgicDequeueVirqState(&g_virqPendingQueue, node);
         }
     }
+}
+
+static bool vgicTestInterruptEligibility(VirqState *state)
+{
+    u16 id = vgicGetVirqStateInterruptId(state);
+
+    // Precondition: state still in list
+
+    if (id < 32 && state->coreId != currentCoreCtx->coreId) {
+        // We can't handle SGIs/PPIs of other cores.
+        return false;
+    }
+
+    return vgicIsVirqEnabled(id) && (g_irqManager.gic.gicd->itargetsr[id] & BIT(currentCoreCtx->coreId)) != 0;
+}
+
+// Returns highest priority
+static u32 vgicChoosePendingInterrupts(size_t *outNumChosen, VirqState *chosen[], size_t maxNum)
+{
+    u32 highestPrio = 0x1F;
+    *outNumChosen = 0;
+
+    for (VirqState *node = g_virqPendingQueue.first, *next; node != vgicGetQueueEnd() && *outNumChosen < maxNum; node = next) {
+        next = vgicGetNextQueuedVirqState(node);
+        if (vgicTestInterruptEligibility(node)) {
+            highestPrio = highestPrio < node->priority ? highestPrio : node->priority;
+            node->handled = true;
+            vgicDequeueVirqState(&g_virqPendingQueue, node);
+            chosen[(*outNumChosen)++] = node;
+        }
+    }
+
+    return highestPrio;
 }
 
 void handleVgicdMmio(ExceptionStackFrame *frame, DataAbortIss dabtIss, size_t offset)
