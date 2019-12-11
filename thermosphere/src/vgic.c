@@ -779,6 +779,32 @@ static bool vgicUpdateListRegister(ArmGicV2ListRegister *lr)
     }
 }
 
+static void vgicUpdateInterruptLists(void)
+{
+    u64 usedMap = ~vgicGetElrsrRegister() & MASKL(g_irqManager.numListRegisters);
+
+    // First, put back inactive interrupts into the queue
+    FOREACH_BIT (tmp, pos, usedMap) {
+        vgicUpdateListRegister(&g_irqManager.gic.gich->lr[pos]);
+    }
+
+    // Then, clean the list up
+    vgicCleanupPendingList();
+
+    size_t numChosen;
+    u32 newHiPrio;
+    size_t numFreeLr = vgicGetNumberOfFreeListRegisters();
+    VirqState *chosen[numFreeLr]; // yes this is a VLA, potentially dangerous. Usually max 4 (64 at most)
+
+    // Choose interrupts...
+    newHiPrio = vgicChoosePendingInterrupts(&numChosen, chosen, numFreeLr);
+
+    // ...and push them
+    for (size_t i = 0; i < numChosen; i++) {
+        vgicPushListRegisters(chosen, numChosen);
+    }
+}
+
 void handleVgicdMmio(ExceptionStackFrame *frame, DataAbortIss dabtIss, size_t offset)
 {
     size_t sz = BITL(dabtIss.sas);
