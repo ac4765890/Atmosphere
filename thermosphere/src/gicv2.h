@@ -82,10 +82,25 @@ typedef struct ArmGicV2ListRegister {
     bool hw             : 1;
 } ArmGicV2ListRegister;
 
+typedef struct ArmGicV2VmControlRegister {
+    bool enableGrp0     : 1;
+    bool enableGrp1     : 1;
+    bool ackCtl         : 1;
+    bool fiqEn          : 1;
+    bool cbpr           : 1;
+    u32 _5              : 4;
+    bool eoiMode        : 1;
+    u32 _10             : 8;
+    u32 abpr            : 3;
+    u32 bpr             : 3;
+    u32 _24             : 3;
+    u32 pmr             : 5;
+} ArmGicV2VmControlRegister;
+
 typedef struct ArmGicV2VirtualInterfaceController {
     u32 hcr;
     u32 vtr;
-    u32 vmcr;
+    ArmGicV2VmControlRegister vmcr;
     u8 _0x0c[0x10 - 0xC];
     u32 misr;
     u8 _0x14[0x20 - 0x14];

@@ -695,6 +695,14 @@ static u32 vgicChoosePendingInterrupts(size_t *outNumChosen, VirqState *chosen[]
     return highestPrio;
 }
 
+static inline bool vgicIsInterruptRaisable(u32 prio)
+{
+    ArmGicV2VmControlRegister vmcr = g_irqManager.gic.gich->vmcr;
+    u32 rpr = g_irqManager.gic.gicv->rpr;
+    u32 grpMask = ~MASK(vmcr.bpr + 1) & 0xFF;
+    return prio < vmcr.pmr && (grpMask == 0 || ((prio << 3) & grpMask) < (rpr & grpMask));
+}
+
 static inline u64 vgicGetElrsrRegister(void)
 {
     return (u64)g_irqManager.gic.gich->elsr0 | (((u64)g_irqManager.gic.gich->elsr1) << 32);
