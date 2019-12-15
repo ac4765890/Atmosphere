@@ -89,18 +89,6 @@ static inline u16 vgicGetVirqStateInterruptId(VirqState *cur)
     }
 }
 
-static inline u16 vgicGetVirqStateInterruptId(VirqState *cur)
-{
-    u32 idx = vgicGetVirqStateIndex(cur);
-    /*if (idx == MAX_NUM_INTERRUPTS) {
-        return GIC_IRQID_SPURIOUS;
-    } else*/ if (idx >= 512 - 32) {
-        return (idx - 512 + 32) % 32;
-    } else {
-        return idx;
-    }
-}
-
 static inline u32 vgicGetVirqStateCoreId(VirqState *cur)
 {
     u32 idx = vgicGetVirqStateIndex(cur);
@@ -120,7 +108,6 @@ static inline u32 vgicGetSgiCurrentSourceCoreId(VirqState *cur)
 // Note: ordered by priority
 static void vgicEnqueueVirqState(VirqStateList *list, VirqState *elem)
 {
-    u32 prio = elem->priority;
     VirqState *pos;
 
     ++list->size;
@@ -167,7 +154,6 @@ static void vgicEnqueueVirqState(VirqStateList *list, VirqState *elem)
 
 static void vgicDequeueVirqState(VirqStateList *list, VirqState *elem)
 {
-    u32 idx = vgicGetVirqStateIndex(elem);
     VirqState *prev = vgicGetPrevQueuedVirqState(elem);
     VirqState *next = vgicGetNextQueuedVirqState(elem);
 
@@ -218,7 +204,7 @@ static inline bool vgicIsVirqPending(VirqState *state)
     return state->pendingLatch || (!vgicIsVirqEdgeTriggered(vgicGetVirqStateInterruptId(state)) && state->pending);
 }
 
-static inline bool vgicSetVirqPendingField(VirqState *state, bool val)
+static inline void vgicSetVirqPendingField(VirqState *state, bool val)
 {
     if (!vgicIsVirqEdgeTriggered(vgicGetVirqStateInterruptId(state))) {
         state->pending = val;
@@ -534,7 +520,6 @@ static void handleVgicMmioWrite(ExceptionStackFrame *frame, DataAbortIss dabtIss
     }
 }
 
-
 static void handleVgicMmioRead(ExceptionStackFrame *frame, DataAbortIss dabtIss, size_t offset)
 {
     size_t sz = BITL(dabtIss.sas);
@@ -644,7 +629,13 @@ static void vgicCleanupPendingList(void)
                 if (mask == 0) {
                     g_irqManager.gic.gicd->icactiver[id / 32] = mask;
                     pending = false;
+                } else {
+                    pending = true;
                 }
+            } else {
+                // Oops, can't handle PPIs of other cores
+                // Assume interrupt is still pending and call it a day
+                pending = true;
             }
         } else {
             pending = node->pendingLatch;
@@ -660,7 +651,7 @@ static void vgicCleanupPendingList(void)
 static bool vgicTestInterruptEligibility(VirqState *state)
 {
     u16 id = vgicGetVirqStateInterruptId(state);
-    u32 coreId = vgicGetVirqStateCoreId(node);
+    u32 coreId = vgicGetVirqStateCoreId(state);
 
     // Precondition: state still in list
 
@@ -685,7 +676,7 @@ static u32 vgicChoosePendingInterrupts(size_t *outNumChosen, VirqState *chosen[]
             highestPrio = highestPrio < node->priority ? highestPrio : node->priority;
             node->handled = true;
             if (irqId < 16) {
-                node->coreId = __builtin_ctz(g_virqSgiPendingSources[vgicGetVirqStateCoreId()][irqId]);
+                node->coreId = __builtin_ctz(g_virqSgiPendingSources[vgicGetVirqStateCoreId(node)][irqId]);
             }
             vgicDequeueVirqState(&g_virqPendingQueue, node);
             chosen[(*outNumChosen)++] = node;
@@ -698,9 +689,13 @@ static u32 vgicChoosePendingInterrupts(size_t *outNumChosen, VirqState *chosen[]
 static inline bool vgicIsInterruptRaisable(u32 prio)
 {
     ArmGicV2VmControlRegister vmcr = g_irqManager.gic.gich->vmcr;
-    u32 rpr = g_irqManager.gic.gicv->rpr;
+    if (prio >= vmcr.pmr) {
+        return false;
+    }
+
     u32 grpMask = ~MASK(vmcr.bpr + 1) & 0xFF;
-    return prio < vmcr.pmr && (grpMask == 0 || ((prio << 3) & grpMask) < (rpr & grpMask));
+    u32 rpr = g_irqManager.gic.gicv->rpr;
+    return rpr >= GICV_IDLE_PRIORITY || ((prio << 3) & grpMask) < (g_irqManager.gic.gicv->rpr & grpMask);
 }
 
 static inline u64 vgicGetElrsrRegister(void)
@@ -718,7 +713,7 @@ static inline size_t vgicGetNumberOfFreeListRegisters(void)
     return __builtin_popcountll(vgicGetElrsrRegister());
 }
 
-static inline ArmGicV2ListRegister *vgicGetFreeListRegister(void)
+static inline volatile ArmGicV2ListRegister *vgicGetFreeListRegister(void)
 {
     u32 ff = __builtin_ffsll(vgicGetElrsrRegister());
     return ff == 0 ? NULL : &g_irqManager.gic.gich->lr[ff - 1];
@@ -763,14 +758,14 @@ static void vgicPushListRegisters(VirqState *chosen[], size_t num)
     }
 }
 
-static bool vgicUpdateListRegister(ArmGicV2ListRegister *lr)
+static bool vgicUpdateListRegister(volatile ArmGicV2ListRegister *lr)
 {
     u16 irqId = lr->virtualId;
+    ArmGicV2ListRegister zero = {0};
 
     // Update the state
     VirqState *state = vgicGetVirqState(currentCoreCtx->coreId, irqId);
     state->active = lr->active;
-    //vgicSetVirqPendingField(state, lr->pending);
 
     if (lr->active) {
         // We don't touch active interrupts
@@ -778,22 +773,27 @@ static bool vgicUpdateListRegister(ArmGicV2ListRegister *lr)
     } else if (lr->pending) {
         // New interrupts might have come, pending status might have been changed, etc.
         // We need to put the interrupt back in the pending list (which we clean up afterwards)
-        vgicEnqueueVirqState(g_virqPendingQueue, state);
-        memset(lr, 0, sizeof(lr));
+        vgicEnqueueVirqState(&g_virqPendingQueue, state);
+        state->handled = false;
+        *lr = zero;
         return true;
     } else {
-        memset(lr, 0, sizeof(lr));
+        // Inactive interrupt, cleanup
+        vgicSetVirqPendingField(state, 0);
+        state->handled = false;
+        *lr = zero;
         return false;
     }
 }
 
-static void vgicUpdateInterruptLists(void)
+void vgicUpdateState(void)
 {
+    volatile ArmGicV2VirtualInterfaceController *gich = g_irqManager.gic.gich;
     u64 usedMap = ~vgicGetElrsrRegister() & MASKL(g_irqManager.numListRegisters);
 
     // First, put back inactive interrupts into the queue
     FOREACH_BIT (tmp, pos, usedMap) {
-        vgicUpdateListRegister(&g_irqManager.gic.gich->lr[pos]);
+        vgicUpdateListRegister(&gich->lr[pos]);
     }
 
     // Then, clean the list up
@@ -811,8 +811,37 @@ static void vgicUpdateInterruptLists(void)
     for (size_t i = 0; i < numChosen; i++) {
         vgicPushListRegisters(chosen, numChosen);
     }
+
+    // Raise vIRQ when applicable. We only need to check for the highest priority
+    if (vgicIsInterruptRaisable(newHiPrio)) {
+        u32 hcr = GET_SYSREG(hcr_el2);
+        SET_SYSREG(hcr_el2, hcr | HCR_VI);
+    }
+
+    // Enable underflow interrupt when appropriate to do so
+    if (vgicGetNumberOfFreeListRegisters() != g_irqManager.numListRegisters) {
+        gich->hcr.uie = true;
+    } else {
+        gich->hcr.uie = false;
+    }
 }
 
+void vgicMaintenanceInterruptHandler(void)
+{
+    ArmGicV2MaintenanceIntStatRegister misr = g_irqManager.gic.gich->misr;
+
+    // Force GICV_CTRL to behave like ns-GICC_CTLR, with group 1 being replaced by group 0
+    if (misr.vgrp0e || misr.vgrp0d || misr.vgrp1e || misr.vgrp1d) {
+        g_irqManager.gic.gicv->ctlr &= BIT(9) | BIT(0);
+    }
+
+    if (misr.lrenp) {
+        DEBUG("VGIC: List Register Entry Not Present maintenance interrupt!");
+        panic();
+    }
+
+    // The rest should be handled by the main loop...
+}
 void handleVgicdMmio(ExceptionStackFrame *frame, DataAbortIss dabtIss, size_t offset)
 {
     size_t sz = BITL(dabtIss.sas);
@@ -853,6 +882,15 @@ void handleVgicdMmio(ExceptionStackFrame *frame, DataAbortIss dabtIss, size_t of
     recursiveSpinlockUnlock(&g_irqManager.lock);
 }
 
+// lock needs to be held by caller
+// note, irqId >= 16
+void vgicEnqueuePhysicalIrq(u16 irqId)
+{
+    VirqState *state = vgicGetVirqState(currentCoreCtx->coreId, irqId);
+    vgicSetVirqPendingField(state, true);
+    vgicEnqueueVirqState(&g_virqPendingQueue, state);
+}
+
 void vgicInit(void)
 {
     if (currentCoreCtx->isBootCore) {
@@ -862,10 +900,6 @@ void vgicInit(void)
             g_virqStates[i].listNext = g_virqStates[i].listPrev = MAX_NUM_INTERRUPTS;
         }
     }
-}
 
-// lock needs to be held by caller
-void vgicEnqueuePhysicalIrq(u16 id)
-{
-
+    g_irqManager.gic.gich->hcr.en = true;
 }

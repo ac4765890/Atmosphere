@@ -22,7 +22,6 @@
 void handleVgicdMmio(ExceptionStackFrame *frame, DataAbortIss dabtIss, size_t offset);
 
 void vgicInit(void);
-
-void vgicEnqueuePhysicalIrq(u16 id);
-
-void vgicHandleIrqs(void);
+void vgicUpdateState(void);
+void vgicMaintenanceInterruptHandler(void);
+void vgicEnqueuePhysicalIrq(u16 irqId);

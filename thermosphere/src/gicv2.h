@@ -21,6 +21,8 @@
 #define GIC_IRQID_MAX                   1020
 #define GIC_IRQID_SPURIOUS_GRPNEEDACK   (GIC_IRQID_MAX + 2)
 #define GIC_IRQID_SPURIOUS              (GIC_IRQID_MAX + 3)
+#define GICV_PRIO_LEVELS                32
+#define GICV_IDLE_PRIORITY              0xF8 // sometimes 0xFF
 
 typedef struct ArmGicV2Distributor {
     u32 ctlr;
@@ -71,6 +73,31 @@ typedef struct ArmGicV2Controller {
     u8 _0x1004[0x2000 - 0x1004];
 } ArmGicV2Controller;
 
+typedef struct ArmGicV2HypervisorControlRegister {
+    bool en         : 1;
+    bool uie        : 1;
+    bool lrenpie    : 1;
+    bool npie       : 1;
+    bool vgrp0eie   : 1;
+    bool vgrp0die   : 1;
+    bool vgrp1eie   : 1;
+    bool vgrp1die   : 1;
+    u32 _8          : 19;
+    u32 eoiCount    : 5;
+} ArmGicV2HypervisorControlRegister;
+
+typedef struct ArmGicV2MaintenanceIntStatRegister {
+    bool eoi    : 1;
+    bool u      : 1;
+    bool lrenp  : 1;
+    bool np     : 1;
+    bool vgrp0e : 1;
+    bool vgrp0d : 1;
+    bool vgrp1e : 1;
+    bool vgrp1d : 1;
+    u32 _8      : 24;
+} ArmGicV2MaintenanceIntStatRegister;
+
 typedef struct ArmGicV2ListRegister {
     u32 virtualId       : 9;
     u32 physicalId      : 10; // note: different encoding if hw = 0 (can't represent it in struct)
@@ -98,11 +125,11 @@ typedef struct ArmGicV2VmControlRegister {
 } ArmGicV2VmControlRegister;
 
 typedef struct ArmGicV2VirtualInterfaceController {
-    u32 hcr;
+    ArmGicV2HypervisorControlRegister hcr;
     u32 vtr;
     ArmGicV2VmControlRegister vmcr;
     u8 _0x0c[0x10 - 0xC];
-    u32 misr;
+    ArmGicV2MaintenanceIntStatRegister misr;
     u8 _0x14[0x20 - 0x14];
     u32 eisr0;
     u32 eisr1;
