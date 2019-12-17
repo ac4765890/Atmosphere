@@ -205,7 +205,8 @@ namespace ams::mitm::fs {
             /* PRODINFO should *never* be writable. */
             /* If we have permissions, create a read only storage. */
             if (can_read_cal) {
-                out.SetValue(std::make_shared<IStorageInterface>(new ReadOnlyStorageAdapter(new RemoteStorage(bis_storage))), target_object_id);
+                //out.SetValue(std::make_shared<IStorageInterface>(new ReadOnlyStorageAdapter(new RemoteStorage(bis_storage))), target_object_id);
+                out.SetValue(std::make_shared<IStorageInterface>(new RemoteStorage(bis_storage)), target_object_id);
             } else {
                 /* If we can't read cal, return permission denied. */
                 fsStorageClose(&bis_storage);
